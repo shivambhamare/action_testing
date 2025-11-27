@@ -1,12 +1,79 @@
-name: Multi-scan compare with main
+name: Nightly baselines + branch scans
 
 on:
+  # Nightly job to refresh baselines on main
+  schedule:
+    - cron: '0 18 * * *'        # every day at 18:00 UTC (adjust as needed)
+
+  # Manual trigger if you want to force-refresh baselines
+  workflow_dispatch:
+
+  # Branch scans (dev, feature, etc.)
   push:
     branches:
-      - '**'     # run on all branches
+      - '**'                    # all branches
+  pull_request:
+    branches:
+      - '**'
 
 jobs:
-  scans:
+  # ===========================================
+  # 1) NIGHTLY BASELINES (main branch only)
+  # ===========================================
+  nightly_baselines:
+    # Run only for schedule or manual, and only when ref is main
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        scan_type: [code, container, dependency]
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # Run scan on MAIN and store as baseline
+      - name: Run ${{ matrix.scan_type }} scan on main
+        run: |
+          mkdir -p scans/${{ matrix.scan_type }}/baseline
+
+          case "${{ matrix.scan_type }}" in
+            code)
+              # 🔁 YOUR REAL CODE SCAN COMMAND HERE
+              # Example:
+              # semgrep --config=p/ci --json > scans/code/baseline/result.json
+              echo "code scan result for main $(date)" > scans/code/baseline/result.txt
+              ;;
+            container)
+              # 🔁 YOUR REAL CONTAINER SCAN COMMAND HERE
+              # Example:
+              # trivy image --format json -o scans/container/baseline/result.json your-image:tag
+              echo "container scan result for main $(date)" > scans/container/baseline/result.txt
+              ;;
+            dependency)
+              # 🔁 YOUR REAL DEPENDENCY SCAN COMMAND HERE
+              # Example:
+              # osv-scanner --json > scans/dependency/baseline/result.json
+              echo "dependency scan result for main $(date)" > scans/dependency/baseline/result.txt
+              ;;
+          esac
+
+      # Upload baseline artifact (one per scan type)
+      - name: Upload baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.scan_type }}_scan_baseline
+          path: scans/${{ matrix.scan_type }}/baseline/
+
+  # ===========================================
+  # 2) BRANCH SCANS (dev/feature/etc) USING NIGHTLY BASELINES
+  # ===========================================
+  branch_scans:
+    # Do NOT run this job for nightly (schedule). Only for push/PR.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     strategy:
@@ -17,98 +84,125 @@ jobs:
       - name: Checkout current branch
         uses: actions/checkout@v4
 
-      # 1) Run scan on CURRENT branch
+      # 1) Run scan on CURRENT BRANCH
       - name: Run ${{ matrix.scan_type }} scan on current branch
         run: |
           mkdir -p scans/${{ matrix.scan_type }}/current
 
           case "${{ matrix.scan_type }}" in
             code)
-              # 🔁 your code scan command
-              echo "code scan result for ${{ github.ref_name }}" > scans/code/current/result.txt
+              # 🔁 YOUR REAL CODE SCAN COMMAND HERE
+              echo "code scan result for ${{ github.ref_name }} $(date)" > scans/code/current/result.txt
               ;;
             container)
-              # 🔁 your container scan command
-              echo "container scan result for ${{ github.ref_name }}" > scans/container/current/result.txt
+              # 🔁 YOUR REAL CONTAINER SCAN COMMAND HERE
+              echo "container scan result for ${{ github.ref_name }} $(date)" > scans/container/current/result.txt
               ;;
             dependency)
-              # 🔁 your dependency scan command
-              echo "dependency scan result for ${{ github.ref_name }}" > scans/dependency/current/result.txt
+              # 🔁 YOUR REAL DEPENDENCY SCAN COMMAND HERE
+              echo "dependency scan result for ${{ github.ref_name }} $(date)" > scans/dependency/current/result.txt
               ;;
           esac
 
-      # 2) On MAIN: upload baseline and STOP
-      - name: Upload baseline artifact (only on main)
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scan_type }}_scan_baseline
-          path: scans/${{ matrix.scan_type }}/current/
-
-      # === Everything below only runs on NON-main ===
-
-      # 3) Checkout main branch in separate folder
-      - name: Checkout main branch
-        if: github.ref_name != 'main'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-src
-
-      # 4) Run same scan on MAIN
-      - name: Run ${{ matrix.scan_type }} scan on main
-        if: github.ref_name != 'main'
+      # 2) Get latest SUCCESSFUL nightly-baseline run on main
+      - name: Get latest nightly baseline run on main
+        id: get_baseline_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd main-src
+          REPO="${{ github.repository }}"
+          WORKFLOW_FILE="scans.yml"   # 👈 MUST MATCH THIS FILE'S NAME
+
+          echo "Looking for latest successful $WORKFLOW_FILE on main in $REPO"
+
+          set +e
+          response=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs" \
+            --field branch=main --field status=success --field per_page=1 2>&1)
+          status=$?
+          set -e
+
+          if [ $status -ne 0 ]; then
+            echo "Failed to query workflow runs:"
+            echo "$response"
+            echo "has_baseline=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          run_id=$(echo "$response" | jq -r '.workflow_runs[0].id // empty')
+
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "No successful nightly baseline run found on main. Skipping compare."
+            echo "has_baseline=false" >> $GITHUB_OUTPUT
+          else
+            echo "Latest baseline run id: $run_id"
+            echo "has_baseline=true" >> $GITHUB_OUTPUT
+            echo "run_id=$run_id" >> $GITHUB_OUTPUT
+          fi
+
+      # 3) Download the correct baseline artifact for THIS scan_type
+      - name: Download nightly baseline artifact
+        if: steps.get_baseline_run.outputs.has_baseline == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_ID="${{ steps.get_baseline_run.outputs.run_id }}"
+          ARTIFACT_NAME="${{ matrix.scan_type }}_scan_baseline"
+
+          echo "Looking for artifact $ARTIFACT_NAME in run $RUN_ID"
+
+          set +e
+          artifact_id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id // empty" 2>&1)
+          status=$?
+          set -e
+
+          if [ $status -ne 0 ] || [ -z "$artifact_id" ]; then
+            echo "No artifact named ${ARTIFACT_NAME} found in baseline run. Skipping compare."
+            exit 0
+          fi
+
+          echo "Found artifact id: $artifact_id"
+
           mkdir -p scans/${{ matrix.scan_type }}/baseline
+          gh api "repos/$REPO/actions/artifacts/$artifact_id/zip" -o baseline.zip
+          unzip baseline.zip -d scans/${{ matrix.scan_type }}/baseline
 
-          case "${{ matrix.scan_type }}" in
-            code)
-              # 🔁 same code scan, but for main
-              echo "code scan result for main" > scans/code/baseline/result.txt
-              ;;
-            container)
-              # 🔁 same container scan, but for main
-              echo "container scan result for main" > scans/container/baseline/result.txt
-              ;;
-            dependency)
-              # 🔁 same dependency scan, but for main
-              echo "dependency scan result for main" > scans/dependency/baseline/result.txt
-              ;;
-          esac
-
-      # 5) Compare current branch vs main for this scan type
+      # 4) Compare nightly baseline vs current scan
       - name: Generate diff for ${{ matrix.scan_type }} scan
-        if: github.ref_name != 'main'
+        if: steps.get_baseline_run.outputs.has_baseline == 'true'
         run: |
           mkdir -p scans/${{ matrix.scan_type }}/diff
 
-          echo "=== Diff: main vs ${{ github.ref_name }} for ${{ matrix.scan_type }} scan ===" \
-            > scans/${{ matrix.scan_type }}/diff/diff.txt
-          echo "" >> scans/${{ matrix.scan_type }}/diff/diff.txt
+          DIFF_FILE="scans/${{ matrix.scan_type }}/diff/diff.txt"
 
-          echo ">> main baseline files:"
-          ls -R main-src/scans/${{ matrix.scan_type }}/baseline || echo "no main baseline"
+          echo "=== Diff: nightly main baseline vs ${{ github.ref_name }} for ${{ matrix.scan_type }} scan ===" > "$DIFF_FILE"
+          echo "" >> "$DIFF_FILE"
 
-          echo ">> current branch files:"
-          ls -R scans/${{ matrix.scan_type }}/current || echo "no current files"
+          echo ">> Baseline files:" >> "$DIFF_FILE"
+          ls -R scans/${{ matrix.scan_type }}/baseline >> "$DIFF_FILE" 2>&1 || echo "no baseline files" >> "$DIFF_FILE"
 
-          # Simple textual diff – replace with your own logic if needed
-          diff -ru main-src/scans/${{ matrix.scan_type }}/baseline \
+          echo "" >> "$DIFF_FILE"
+          echo ">> Current branch files:" >> "$DIFF_FILE"
+          ls -R scans/${{ matrix.scan_type }}/current >> "$DIFF_FILE" 2>&1 || echo "no current files" >> "$DIFF_FILE"
+
+          echo "" >> "$DIFF_FILE"
+          echo ">> Unified diff:" >> "$DIFF_FILE"
+
+          diff -ru scans/${{ matrix.scan_type }}/baseline \
                   scans/${{ matrix.scan_type }}/current \
-                  >> scans/${{ matrix.scan_type }}/diff/diff.txt || true
+                  >> "$DIFF_FILE" || true
 
-      # 6) Upload diff artifact
+      # 5) Upload diff artifact
       - name: Upload diff artifact
-        if: github.ref_name != 'main'
+        if: steps.get_baseline_run.outputs.has_baseline == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.scan_type }}_scan_diff
           path: scans/${{ matrix.scan_type }}/diff/diff.txt
 
-      # 7) (optional) upload current branch scan result too
+      # 6) Optional: upload current scan result
       - name: Upload current scan result
-        if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.scan_type }}_scan_result
