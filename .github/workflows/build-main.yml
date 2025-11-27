@@ -1,28 +1,28 @@
-name: Build & compare dev with main
+name: Build & compare on main
 
 on:
   push:
     branches:
-      - dev
+      - main
 
 jobs:
-  build-and-compare-dev:
+  build-and-compare-main:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout dev
+      - name: Checkout main
         uses: actions/checkout@v4
 
-      # 1) Build artifact for dev (same structure as main)
-      - name: Build dev artifact
+      # 1) Build artifact for main (NEW main)
+      - name: Build main artifact
         run: |
           mkdir -p build-output
           # 🔁 replace with your real build commands
-          echo "dev build $(date)" > build-output/app.txt
+          echo "main build $(date)" > build-output/app.txt
 
-      # 2) Get latest successful main run of main workflow
-      - name: Get latest main artifact run
-        id: get_main_run
+      # 2) Get previous successful main run of THIS workflow
+      - name: Get previous successful main run
+        id: get_prev_run
         run: |
           REPO="${{ github.repository }}"
           WORKFLOW_FILE="build-and-compare-main.yml"
@@ -32,59 +32,59 @@ jobs:
             --jq '.workflow_runs[0].id // empty')
 
           if [ -z "$run_id" ]; then
-            echo "No successful main run found."
-            echo "has_main=false" >> $GITHUB_OUTPUT
+            echo "No previous successful main run found."
+            echo "has_prev=false" >> $GITHUB_OUTPUT
           else
-            echo "Latest successful main run: $run_id"
-            echo "has_main=true" >> $GITHUB_OUTPUT
+            echo "Previous successful main run: $run_id"
+            echo "has_prev=true" >> $GITHUB_OUTPUT
             echo "run_id=$run_id" >> $GITHUB_OUTPUT
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3) Download main artifact from that run
-      - name: Download main artifact
-        if: steps.get_main_run.outputs.has_main == 'true'
+      # 3) Download previous main artifact (if exists)
+      - name: Download previous main artifact
+        if: steps.get_prev_run.outputs.has_prev == 'true'
         run: |
           REPO="${{ github.repository }}"
-          RUN_ID="${{ steps.get_main_run.outputs.run_id }}"
+          RUN_ID="${{ steps.get_prev_run.outputs.run_id }}"
           ARTIFACT_NAME="main-artifact"
 
           artifact_id=$(gh api repos/$REPO/actions/runs/$RUN_ID/artifacts \
             --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id // empty")
 
           if [ -z "$artifact_id" ]; then
-            echo "No artifact named ${ARTIFACT_NAME} found in main run."
+            echo "No artifact named ${ARTIFACT_NAME} in previous run."
             exit 0
           fi
 
-          gh api repos/$REPO/actions/artifacts/$artifact_id/zip -o main.zip
-          mkdir main-artifact
-          unzip main.zip -d main-artifact
+          gh api repos/$REPO/actions/artifacts/$artifact_id/zip -o prev-main.zip
+          mkdir prev-main
+          unzip prev-main.zip -d prev-main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4) Generate diff file: MAIN artifact vs DEV artifact
+      # 4) Generate diff file: previous main vs NEW main
       - name: Generate diff-with-main.txt
-        if: steps.get_main_run.outputs.has_main == 'true'
+        if: steps.get_prev_run.outputs.has_prev == 'true'
         run: |
           mkdir -p diff-output
 
-          echo "=== Diff: main vs dev ===" > diff-output/diff-with-main.txt
+          echo "=== Diff: previous main vs new main ===" > diff-output/diff-with-main.txt
           echo "" >> diff-output/diff-with-main.txt
-          diff -ru main-artifact build-output >> diff-output/diff-with-main.txt || true
+          diff -ru prev-main build-output >> diff-output/diff-with-main.txt || true
 
-      # 5) Upload diff (same name as main workflow)
+      # 5) Upload diff (same name for both main & dev)
       - name: Upload diff-with-main artifact
-        if: steps.get_main_run.outputs.has_main == 'true'
+        if: steps.get_prev_run.outputs.has_prev == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: diff-with-main
           path: diff-output/diff-with-main.txt
 
-      # 6) (optional) Upload dev artifact
-      - name: Upload dev artifact
+      # 6) Upload NEW main artifact (baseline for dev & next main run)
+      - name: Upload main artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dev-artifact
+          name: main-artifact
           path: build-output/
