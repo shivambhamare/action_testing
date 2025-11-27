@@ -1,90 +1,116 @@
-name: Build & compare on main
+name: Build & compare with main
 
 on:
   push:
     branches:
       - main
+      - dev
+      # add more branches if you want, e.g.:
+      # - feature/*
+      # - bugfix/*
 
 jobs:
-  build-and-compare-main:
+  build-and-compare:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout main
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1) Build artifact for main (NEW main)
-      - name: Build main artifact
+      # 1) Build artifact (same for all branches)
+      - name: Build artifact
         run: |
           mkdir -p build-output
-          # 🔁 replace with your real build commands
-          echo "main build $(date)" > build-output/app.txt
+          # 🔁 replace this with your real build
+          echo "${{ github.ref_name }} build $(date)" > build-output/app.txt
 
-      # 2) Get previous successful main run of THIS workflow
-      - name: Get previous successful main run
-        id: get_prev_run
+      # 2) If this is MAIN branch: only upload baseline artifact, no compare
+      - name: Upload main artifact (only on main)
+        if: github.ref_name == 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-artifact
+          path: build-output/
+
+      # 3) For NON-main branches: get latest successful main run of THIS workflow
+      - name: Get latest main artifact run
+        if: github.ref_name != 'main'
+        id: get_main_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ github.repository }}"
-          WORKFLOW_FILE="build-main.yml"   # 👈 FIXED HERE
+          WORKFLOW_FILE="build-main.yml"   # 👈 this file name
 
-          run_id=$(gh api repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs \
-            --field branch=main --field status=success --field per_page=1 \
-            --jq '.workflow_runs[0].id // empty')
+          echo "Checking latest successful $WORKFLOW_FILE on 'main' in $REPO"
 
-          if [ -z "$run_id" ]; then
-            echo "No previous successful main run found."
-            echo "has_prev=false" >> $GITHUB_OUTPUT
+          # Ask GitHub for latest successful run on main
+          response=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs" \
+            --field branch=main --field status=success --field per_page=1)
+
+          run_id=$(echo "$response" | jq -r '.workflow_runs[0].id // empty')
+
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "No successful main run found. Skipping compare."
+            echo "has_main=false" >> $GITHUB_OUTPUT
           else
-            echo "Previous successful main run: $run_id"
-            echo "has_prev=true" >> $GITHUB_OUTPUT
+            echo "Latest successful main run: $run_id"
+            echo "has_main=true" >> $GITHUB_OUTPUT
             echo "run_id=$run_id" >> $GITHUB_OUTPUT
           fi
 
-      # 3) Download previous main artifact (if exists)
-      - name: Download previous main artifact
-        if: steps.get_prev_run.outputs.has_prev == 'true'
+      # 4) Download main artifact from that run (only on non-main branches)
+      - name: Download main artifact
+        if: github.ref_name != 'main' && steps.get_main_run.outputs.has_main == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ github.repository }}"
-          RUN_ID="${{ steps.get_prev_run.outputs.run_id }}"
+          RUN_ID="${{ steps.get_main_run.outputs.run_id }}"
           ARTIFACT_NAME="main-artifact"
 
-          artifact_id=$(gh api repos/$REPO/actions/runs/$RUN_ID/artifacts \
+          echo "Looking for artifact $ARTIFACT_NAME in run $RUN_ID"
+
+          artifact_id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
             --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id // empty")
 
           if [ -z "$artifact_id" ]; then
-            echo "No artifact named ${ARTIFACT_NAME} in previous run."
+            echo "No artifact named ${ARTIFACT_NAME} found in main run. Skipping compare."
             exit 0
           fi
 
-          gh api repos/$REPO/actions/artifacts/$artifact_id/zip -o prev-main.zip
-          mkdir prev-main
-          unzip prev-main.zip -d prev-main
+          echo "Found artifact id: $artifact_id"
 
-      # 4) Generate diff file: previous main vs NEW main
+          gh api "repos/$REPO/actions/artifacts/$artifact_id/zip" -o main.zip
+          mkdir main-artifact
+          unzip main.zip -d main-artifact
+
+      # 5) Generate diff file: MAIN artifact vs CURRENT BRANCH artifact
       - name: Generate diff-with-main.txt
-        if: steps.get_prev_run.outputs.has_prev == 'true'
+        if: github.ref_name != 'main' && steps.get_main_run.outputs.has_main == 'true'
         run: |
           mkdir -p diff-output
-
-          echo "=== Diff: previous main vs new main ===" > diff-output/diff-with-main.txt
+          echo "=== Diff: main vs ${{ github.ref_name }} ===" > diff-output/diff-with-main.txt
           echo "" >> diff-output/diff-with-main.txt
-          diff -ru prev-main build-output >> diff-output/diff-with-main.txt || true
 
-      # 5) Upload diff (same name for both main & dev)
+          if [ -d main-artifact ]; then
+            diff -ru main-artifact build-output >> diff-output/diff-with-main.txt || true
+          else
+            echo "Main artifact folder not found, skipping diff." >> diff-output/diff-with-main.txt
+          fi
+
+      # 6) Upload diff (only for non-main branches)
       - name: Upload diff-with-main artifact
-        if: steps.get_prev_run.outputs.has_prev == 'true'
+        if: github.ref_name != 'main' && steps.get_main_run.outputs.has_main == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: diff-with-main
           path: diff-output/diff-with-main.txt
 
-      # 6) Upload NEW main artifact (baseline for dev & next main run)
-      - name: Upload main artifact
+      # 7) Optional: upload branch artifact (dev, feature, etc.)
+      - name: Upload branch artifact (non-main)
+        if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: main-artifact
+          name: ${{ github.ref_name }}-artifact
           path: build-output/
