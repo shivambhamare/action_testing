@@ -21,7 +21,7 @@ jobs:
   # 1) NIGHTLY BASELINES (main branch only)
   # ===========================================
   nightly_baselines:
-    # Run only for schedule or manual on main
+    # Run only for schedule, or manual on main
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
     runs-on: ubuntu-latest
 
@@ -45,19 +45,19 @@ jobs:
               # 🔁 YOUR REAL CODE SCAN COMMAND HERE
               # Example:
               # semgrep --config=p/ci --json > scans/code/baseline/result.json
-              echo "code scan result for main $(date)" > scans/code/baseline/result.txt
+              echo "BASELINE: code scan for main $(date)" > scans/code/baseline/result.txt
               ;;
             container)
               # 🔁 YOUR REAL CONTAINER SCAN COMMAND HERE
               # Example:
               # trivy image --format json -o scans/container/baseline/result.json your-image:tag
-              echo "container scan result for main $(date)" > scans/container/baseline/result.txt
+              echo "BASELINE: container scan for main $(date)" > scans/container/baseline/result.txt
               ;;
             dependency)
               # 🔁 YOUR REAL DEPENDENCY SCAN COMMAND HERE
               # Example:
               # osv-scanner --json > scans/dependency/baseline/result.json
-              echo "dependency scan result for main $(date)" > scans/dependency/baseline/result.txt
+              echo "BASELINE: dependency scan for main $(date)" > scans/dependency/baseline/result.txt
               ;;
           esac
 
@@ -69,11 +69,12 @@ jobs:
           path: scans/${{ matrix.scan_type }}/baseline/
 
   # ===========================================
-  # 2) BRANCH SCANS (dev/feature/etc) USING NIGHTLY BASELINES
+  # 2) BRANCH SCANS USING NIGHTLY BASELINES ONLY
+  #    (feature/dev/etc; main is excluded)
   # ===========================================
   branch_scans:
-    # Do NOT run this job for nightly (schedule). Only for push/PR/workflow_dispatch.
-    if: github.event_name != 'schedule'
+    # Do NOT run this job for nightly or on main itself.
+    if: github.event_name != 'schedule' && github.ref_name != 'main'
     runs-on: ubuntu-latest
 
     strategy:
@@ -92,15 +93,15 @@ jobs:
           case "${{ matrix.scan_type }}" in
             code)
               # 🔁 YOUR REAL CODE SCAN COMMAND HERE
-              echo "code scan result for ${{ github.ref_name }} $(date)" > scans/code/current/result.txt
+              echo "CURRENT: code scan for ${{ github.ref_name }} $(date)" > scans/code/current/result.txt
               ;;
             container)
               # 🔁 YOUR REAL CONTAINER SCAN COMMAND HERE
-              echo "container scan result for ${{ github.ref_name }} $(date)" > scans/container/current/result.txt
+              echo "CURRENT: container scan for ${{ github.ref_name }} $(date)" > scans/container/current/result.txt
               ;;
             dependency)
               # 🔁 YOUR REAL DEPENDENCY SCAN COMMAND HERE
-              echo "dependency scan result for ${{ github.ref_name }} $(date)" > scans/dependency/current/result.txt
+              echo "CURRENT: dependency scan for ${{ github.ref_name }} $(date)" > scans/dependency/current/result.txt
               ;;
           esac
 
@@ -111,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ github.repository }}"
-          WORKFLOW_FILE="build-main.yml"   # 👈 MUST MATCH THIS FILE'S NAME
+          WORKFLOW_FILE="build-main.yml"   # 👈 MUST match this file's name
 
           echo "Looking for latest successful $WORKFLOW_FILE on main in $REPO"
 
@@ -131,7 +132,7 @@ jobs:
           run_id=$(echo "$response" | jq -r '.workflow_runs[0].id // empty')
 
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "No successful nightly baseline run found on main. Skipping compare."
+            echo "No successful nightly baseline run found on main."
             echo "has_baseline=false" >> $GITHUB_OUTPUT
           else
             echo "Latest baseline run id: $run_id"
@@ -139,7 +140,7 @@ jobs:
             echo "run_id=$run_id" >> $GITHUB_OUTPUT
           fi
 
-      # 3) Download the correct baseline artifact for THIS scan_type
+      # 3) Download nightly baseline artifact (ONLY if it exists)
       - name: Download nightly baseline artifact
         if: steps.get_baseline_run.outputs.has_baseline == 'true'
         env:
@@ -168,7 +169,7 @@ jobs:
           gh api "repos/$REPO/actions/artifacts/$artifact_id/zip" -o baseline.zip
           unzip baseline.zip -d scans/${{ matrix.scan_type }}/baseline
 
-      # 4) Compare nightly baseline vs current scan
+      # 4) Compare nightly baseline vs current scan (only if baseline exists)
       - name: Generate diff for ${{ matrix.scan_type }} scan
         if: steps.get_baseline_run.outputs.has_baseline == 'true'
         run: |
@@ -193,7 +194,7 @@ jobs:
                   scans/${{ matrix.scan_type }}/current \
                   >> "$DIFF_FILE" || true
 
-      # 5) Upload diff artifact
+      # 5) Upload diff artifact (only if baseline exists)
       - name: Upload diff artifact
         if: steps.get_baseline_run.outputs.has_baseline == 'true'
         uses: actions/upload-artifact@v4
@@ -201,12 +202,9 @@ jobs:
           name: ${{ matrix.scan_type }}_scan_diff
           path: scans/${{ matrix.scan_type }}/diff/diff.txt
 
-      # 6) Optional: upload current scan result
+      # 6) Always upload current scan result (even if no baseline)
       - name: Upload current scan result
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.scan_type }}_scan_result
           path: scans/${{ matrix.scan_type }}/current/
-
-
-
