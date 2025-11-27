@@ -1,43 +1,53 @@
-name: Build & compare with main
+name: Multi-scan compare with main
 
 on:
   push:
     branches:
-      - main
-      - dev
-      - test
-      # add more branches if you want, e.g.:
-      # - feature/*
-      # - bugfix/*
+      - '**'     # run on all branches
 
 jobs:
-  build-and-compare:
+  scans:
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        scan_type: [code, container, dependency]
+
     steps:
-      # 1) Checkout the current branch (main / dev / feature / etc.)
       - name: Checkout current branch
         uses: actions/checkout@v4
 
-      # 2) Build artifact for the CURRENT branch
-      - name: Build artifact for current branch
+      # 1) Run scan on CURRENT branch
+      - name: Run ${{ matrix.scan_type }} scan on current branch
         run: |
-          mkdir -p build-output
-          # 🔁 Replace this with your real build commands
-          # Example:
-          #   npm install
-          #   npm run build --output-path=build-output
-          echo "${{ github.ref_name }} build $(date)" > build-output/app.txt
+          mkdir -p scans/${{ matrix.scan_type }}/current
 
-      # 3) If this is MAIN: just upload the artifact (no compare)
-      - name: Upload main artifact (only on main)
+          case "${{ matrix.scan_type }}" in
+            code)
+              # 🔁 your code scan command
+              echo "code scan result for ${{ github.ref_name }}" > scans/code/current/result.txt
+              ;;
+            container)
+              # 🔁 your container scan command
+              echo "container scan result for ${{ github.ref_name }}" > scans/container/current/result.txt
+              ;;
+            dependency)
+              # 🔁 your dependency scan command
+              echo "dependency scan result for ${{ github.ref_name }}" > scans/dependency/current/result.txt
+              ;;
+          esac
+
+      # 2) On MAIN: upload baseline and STOP
+      - name: Upload baseline artifact (only on main)
         if: github.ref_name == 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: main-artifact
-          path: build-output/
+          name: ${{ matrix.scan_type }}_scan_baseline
+          path: scans/${{ matrix.scan_type }}/current/
 
-      # 4) For NON-main branches: checkout MAIN in a separate folder
+      # === Everything below only runs on NON-main ===
+
+      # 3) Checkout main branch in separate folder
       - name: Checkout main branch
         if: github.ref_name != 'main'
         uses: actions/checkout@v4
@@ -45,46 +55,61 @@ jobs:
           ref: main
           path: main-src
 
-      # 5) For NON-main branches: build artifact for MAIN (same build commands)
-      - name: Build artifact for main branch
+      # 4) Run same scan on MAIN
+      - name: Run ${{ matrix.scan_type }} scan on main
         if: github.ref_name != 'main'
         run: |
           cd main-src
-          mkdir -p build-output
-          # 🔁 Use EXACT same build commands as above
-          echo "main build $(date)" > build-output/app.txt
+          mkdir -p scans/${{ matrix.scan_type }}/baseline
 
-      # 6) For NON-main branches: compare MAIN artifact vs CURRENT branch artifact
-      - name: Generate diff-with-main.txt
+          case "${{ matrix.scan_type }}" in
+            code)
+              # 🔁 same code scan, but for main
+              echo "code scan result for main" > scans/code/baseline/result.txt
+              ;;
+            container)
+              # 🔁 same container scan, but for main
+              echo "container scan result for main" > scans/container/baseline/result.txt
+              ;;
+            dependency)
+              # 🔁 same dependency scan, but for main
+              echo "dependency scan result for main" > scans/dependency/baseline/result.txt
+              ;;
+          esac
+
+      # 5) Compare current branch vs main for this scan type
+      - name: Generate diff for ${{ matrix.scan_type }} scan
         if: github.ref_name != 'main'
         run: |
-          mkdir -p diff-output
+          mkdir -p scans/${{ matrix.scan_type }}/diff
 
-          echo "=== Diff: main vs ${{ github.ref_name }} ===" > diff-output/diff-with-main.txt
-          echo "" >> diff-output/diff-with-main.txt
+          echo "=== Diff: main vs ${{ github.ref_name }} for ${{ matrix.scan_type }} scan ===" \
+            > scans/${{ matrix.scan_type }}/diff/diff.txt
+          echo "" >> scans/${{ matrix.scan_type }}/diff/diff.txt
 
-          echo ">> listing main build-output"
-          ls -R main-src/build-output || echo "no main build-output"
+          echo ">> main baseline files:"
+          ls -R main-src/scans/${{ matrix.scan_type }}/baseline || echo "no main baseline"
 
-          echo ">> listing current branch build-output"
-          ls -R build-output || echo "no current build-output"
+          echo ">> current branch files:"
+          ls -R scans/${{ matrix.scan_type }}/current || echo "no current files"
 
-          # Compare main build vs current branch build
-          # -ru = recursive, unified diff
-          diff -ru main-src/build-output build-output >> diff-output/diff-with-main.txt || true
+          # Simple textual diff – replace with your own logic if needed
+          diff -ru main-src/scans/${{ matrix.scan_type }}/baseline \
+                  scans/${{ matrix.scan_type }}/current \
+                  >> scans/${{ matrix.scan_type }}/diff/diff.txt || true
 
-      # 7) Upload diff artifact (only for non-main branches)
-      - name: Upload diff-with-main artifact
+      # 6) Upload diff artifact
+      - name: Upload diff artifact
         if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: diff-with-main
-          path: diff-output/diff-with-main.txt
+          name: ${{ matrix.scan_type }}_scan_diff
+          path: scans/${{ matrix.scan_type }}/diff/diff.txt
 
-      # 8) (Optional) upload artifact for non-main branches too
-      - name: Upload branch artifact (non-main)
+      # 7) (optional) upload current branch scan result too
+      - name: Upload current scan result
         if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.ref_name }}-artifact
-          path: build-output/
+          name: ${{ matrix.scan_type }}_scan_result
+          path: scans/${{ matrix.scan_type }}/current/
