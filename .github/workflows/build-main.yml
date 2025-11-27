@@ -3,7 +3,7 @@ name: Nightly baselines + branch scans
 on:
   # Nightly job to refresh baselines on main
   schedule:
-    - cron: '0 18 * * *'        # every day at 18:00 UTC (adjust as needed)
+    - cron: '*/3 * * * *'   # every day at 18:00 UTC (adjust as needed)
 
   # Manual trigger if you want to force-refresh baselines
   workflow_dispatch:
