@@ -1,0 +1,94 @@
+name: Compare dev with main artifact
+
+on:
+  push:
+    branches:
+      - dev        # ✅ only on dev branch
+
+jobs:
+  compare-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+
+      # 1) Build current dev artifact
+      - name: Build dev artifact
+        run: |
+          mkdir -p dist
+          # 👉 your real dev build commands here
+          echo "dev build $(date)" > dist/output.txt
+
+      # 2) Get latest successful main workflow run
+      - name: Get latest main run
+        id: get_run
+        run: |
+          REPO="${{ github.repository }}"
+          WORKFLOW_FILE="main-build.yml"   # 👈 name of main workflow file
+
+          run_id=$(gh api repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs \
+            --field branch=main --field status=success --field per_page=1 \
+            --jq '.workflow_runs[0].id // empty')
+
+          if [ -z "$run_id" ]; then
+            echo "No successful main run found."
+            echo "has_run=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found main run: $run_id"
+            echo "has_run=true" >> $GITHUB_OUTPUT
+            echo "run_id=$run_id" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3) Download main artifact from that run
+      - name: Download main artifact
+        if: steps.get_run.outputs.has_run == 'true'
+        run: |
+          REPO="${{ github.repository }}"
+          RUN_ID="${{ steps.get_run.outputs.run_id }}"
+          ARTIFACT_NAME="main-build-artifact"   # 👈 same name as in main workflow
+
+          artifact_id=$(gh api repos/$REPO/actions/runs/$RUN_ID/artifacts \
+            --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id // empty")
+
+          if [ -z "$artifact_id" ]; then
+            echo "No artifact named ${ARTIFACT_NAME} found in that run."
+            exit 0
+          fi
+
+          gh api repos/$REPO/actions/artifacts/$artifact_id/zip -o main-artifact.zip
+          mkdir main-artifact
+          unzip main-artifact.zip -d main-artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4) Compare main vs dev and save diff to a file
+      - name: Generate dev-main diff file
+        if: steps.get_run.outputs.has_run == 'true'
+        run: |
+          mkdir -p diff-output
+
+          echo "=== main vs dev diff ===" > diff-output/dev-main-diff.txt
+          echo "" >> diff-output/dev-main-diff.txt
+
+          # create unified diff and append to file
+          diff -ru main-artifact dist >> diff-output/dev-main-diff.txt || true
+
+          echo "Diff file generated at diff-output/dev-main-diff.txt"
+      
+      # 5) Upload the diff file as artifact
+      - name: Upload dev-main diff artifact
+        if: steps.get_run.outputs.has_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-main-diff
+          path: diff-output/dev-main-diff.txt
+
+      # 6) (Optional) upload dev build artifact too
+      - name: Upload dev build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-build-artifact
+          path: dist/
