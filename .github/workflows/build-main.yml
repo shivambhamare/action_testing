@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev
+      - test
       # add more branches if you want, e.g.:
       # - feature/*
       # - bugfix/*
