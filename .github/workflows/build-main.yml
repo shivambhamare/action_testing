@@ -322,3 +322,5 @@ jobs:
         with:
           name: ${{ matrix.scan_type }}_scan_result
           path: scans/${{ matrix.scan_type }}/current/
+
+
