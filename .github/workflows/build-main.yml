@@ -3,7 +3,7 @@ name: Nightly baselines + branch scans
 on:
   # Nightly job to refresh baselines on main
   schedule:
-    - cron: '*/3 * * * *'   # every day at 18:00 UTC (adjust as needed)
+    - cron: '*/3 * * * *'   # every 3 minutes
 
   # Manual trigger if you want to force-refresh baselines
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
   # 1) NIGHTLY BASELINES (main branch only)
   # ===========================================
   nightly_baselines:
-    # Run only for schedule or manual, and only when ref is main
+    # Run only for schedule or manual on main
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref_name == 'main')
     runs-on: ubuntu-latest
 
@@ -72,7 +72,7 @@ jobs:
   # 2) BRANCH SCANS (dev/feature/etc) USING NIGHTLY BASELINES
   # ===========================================
   branch_scans:
-    # Do NOT run this job for nightly (schedule). Only for push/PR.
+    # Do NOT run this job for nightly (schedule). Only for push/PR/workflow_dispatch.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
@@ -104,14 +104,14 @@ jobs:
               ;;
           esac
 
-      # 2) Get latest SUCCESSFUL nightly-baseline run on main
+      # 2) Get latest SUCCESSFUL run of THIS workflow on main
       - name: Get latest nightly baseline run on main
         id: get_baseline_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           REPO="${{ github.repository }}"
-          WORKFLOW_FILE="scans.yml"   # 👈 MUST MATCH THIS FILE'S NAME
+          WORKFLOW_FILE="build-main.yml"   # 👈 MUST MATCH THIS FILE'S NAME
 
           echo "Looking for latest successful $WORKFLOW_FILE on main in $REPO"
 
@@ -207,120 +207,3 @@ jobs:
         with:
           name: ${{ matrix.scan_type }}_scan_result
           path: scans/${{ matrix.scan_type }}/current/
-name: Multi-scan compare with main
-
-on:
-  push:
-    branches:
-      - '**'     # run on all branches
-
-jobs:
-  scans:
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        scan_type: [code, container, dependency]
-
-    steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v4
-
-      # 1) Run scan on CURRENT branch
-      - name: Run ${{ matrix.scan_type }} scan on current branch
-        run: |
-          mkdir -p scans/${{ matrix.scan_type }}/current
-
-          case "${{ matrix.scan_type }}" in
-            code)
-              # 🔁 your code scan command
-              echo "code scan result for ${{ github.ref_name }}" > scans/code/current/result.txt
-              ;;
-            container)
-              # 🔁 your container scan command
-              echo "container scan result for ${{ github.ref_name }}" > scans/container/current/result.txt
-              ;;
-            dependency)
-              # 🔁 your dependency scan command
-              echo "dependency scan result for ${{ github.ref_name }}" > scans/dependency/current/result.txt
-              ;;
-          esac
-
-      # 2) On MAIN: upload baseline and STOP
-      - name: Upload baseline artifact (only on main)
-        if: github.ref_name == 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scan_type }}_scan_baseline
-          path: scans/${{ matrix.scan_type }}/current/
-
-      # === Everything below only runs on NON-main ===
-
-      # 3) Checkout main branch in separate folder
-      - name: Checkout main branch
-        if: github.ref_name != 'main'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-src
-
-      # 4) Run same scan on MAIN
-      - name: Run ${{ matrix.scan_type }} scan on main
-        if: github.ref_name != 'main'
-        run: |
-          cd main-src
-          mkdir -p scans/${{ matrix.scan_type }}/baseline
-
-          case "${{ matrix.scan_type }}" in
-            code)
-              # 🔁 same code scan, but for main
-              echo "code scan result for main" > scans/code/baseline/result.txt
-              ;;
-            container)
-              # 🔁 same container scan, but for main
-              echo "container scan result for main" > scans/container/baseline/result.txt
-              ;;
-            dependency)
-              # 🔁 same dependency scan, but for main
-              echo "dependency scan result for main" > scans/dependency/baseline/result.txt
-              ;;
-          esac
-
-      # 5) Compare current branch vs main for this scan type
-      - name: Generate diff for ${{ matrix.scan_type }} scan
-        if: github.ref_name != 'main'
-        run: |
-          mkdir -p scans/${{ matrix.scan_type }}/diff
-
-          echo "=== Diff: main vs ${{ github.ref_name }} for ${{ matrix.scan_type }} scan ===" \
-            > scans/${{ matrix.scan_type }}/diff/diff.txt
-          echo "" >> scans/${{ matrix.scan_type }}/diff/diff.txt
-
-          echo ">> main baseline files:"
-          ls -R main-src/scans/${{ matrix.scan_type }}/baseline || echo "no main baseline"
-
-          echo ">> current branch files:"
-          ls -R scans/${{ matrix.scan_type }}/current || echo "no current files"
-
-          # Simple textual diff – replace with your own logic if needed
-          diff -ru main-src/scans/${{ matrix.scan_type }}/baseline \
-                  scans/${{ matrix.scan_type }}/current \
-                  >> scans/${{ matrix.scan_type }}/diff/diff.txt || true
-
-      # 6) Upload diff artifact
-      - name: Upload diff artifact
-        if: github.ref_name != 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scan_type }}_scan_diff
-          path: scans/${{ matrix.scan_type }}/diff/diff.txt
-
-      # 7) (optional) upload current branch scan result too
-      - name: Upload current scan result
-        if: github.ref_name != 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scan_type }}_scan_result
-          path: scans/${{ matrix.scan_type }}/current/
-
-
