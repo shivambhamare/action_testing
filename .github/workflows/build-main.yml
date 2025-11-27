@@ -1,26 +1,25 @@
-name: Build on main
+name: Build & upload artifact on main
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main       # ✅ only runs when main is updated
 
 jobs:
-  build:
+  build-main:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 👉 Your real build step here
-      - name: Build app (main)
+      - name: Build main artifact
         run: |
           mkdir -p dist
+          # 👉 your real build commands here
           echo "main build $(date)" > dist/output.txt
 
-      # 👉 Upload artifact from main
       - name: Upload main artifact
         uses: actions/upload-artifact@v4
         with:
-          name: main-artifact
+          name: main-build-artifact
           path: dist/
