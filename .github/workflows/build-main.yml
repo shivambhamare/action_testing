@@ -2,25 +2,25 @@ name: Build on main
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout main
+        uses: actions/checkout@v4
 
-      # 👇 Your build step (example)
-      - name: Build app
+      # 👉 Your real build step here
+      - name: Build app (main)
         run: |
           mkdir -p dist
-          echo "some build content" > dist/output.txt
+          echo "main build $(date)" > dist/output.txt
 
-      # 👇 Upload artifact
-      - name: Upload build artifact
+      # 👉 Upload artifact from main
+      - name: Upload main artifact
         uses: actions/upload-artifact@v4
         with:
-          name: main-build-artifact
+          name: main-artifact
           path: dist/
