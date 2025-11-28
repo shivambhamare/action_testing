@@ -34,18 +34,22 @@ jobs:
 
           case "${{ matrix.scan_type }}" in
             code)
-              # replace with your real code scanner
+              # TODO: replace with your real code scanner
               echo "BASELINE: code scan for main $(date)" > scans/code/baseline/result.txt
               ;;
             container)
-              # replace with your real container scanner
+              # TODO: replace with your real container scanner
               echo "BASELINE: container scan for main $(date)" > scans/container/baseline/result.txt
               ;;
             dependency)
-              # replace with your real dependency scanner
+              # TODO: replace with your real dependency scanner
               echo "BASELINE: dependency scan for main $(date)" > scans/dependency/baseline/result.txt
               ;;
           esac
+
+          # debug listing
+          echo "Contents of scans/${{ matrix.scan_type }}/baseline:"
+          ls -la scans/${{ matrix.scan_type }}/baseline || true
 
       - name: Upload baseline artifact
         uses: actions/upload-artifact@v4
@@ -73,44 +77,58 @@ jobs:
 
           case "${{ matrix.scan_type }}" in
             code)
-              # replace with your real code scanner
+              # TODO: replace with your real code scanner
               echo "CURRENT: code scan for ${{ github.ref_name }} $(date)" > scans/code/current/result.txt
               ;;
             container)
-              # replace with your real container scanner
+              # TODO: replace with your real container scanner
               echo "CURRENT: container scan for ${{ github.ref_name }} $(date)" > scans/container/current/result.txt
               ;;
             dependency)
-              # replace with your real dependency scanner
+              # TODO: replace with your real dependency scanner
               echo "CURRENT: dependency scan for ${{ github.ref_name }} $(date)" > scans/dependency/current/result.txt
               ;;
           esac
 
-      - name: Get latest successful nightly run on main by workflow name
+      - name: Get latest successful nightly run on main (debug)
         id: get_baseline_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
-          WORKFLOW_DISPLAY_NAME="Nightly baselines + branch scans"   # must match the `name:` at top of this workflow
+          WORKFLOW_DISPLAY_NAME="Nightly baselines + branch scans"   # must exactly match top-level 'name:'
 
-          echo "Repository: $REPO"
-          echo "Looking for latest successful run on 'main' of workflow: $WORKFLOW_DISPLAY_NAME"
+          echo "Repo: $REPO"
+          echo "Workflow display name to search: '$WORKFLOW_DISPLAY_NAME'"
 
-          # fetch recent runs on main (we ask up to 50 recent runs)
-          response=$(gh api "repos/$REPO/actions/runs" --field branch=main --field status=success --field per_page=50 2>/dev/null || true)
-          if [ -z "$response" ] || [ "$response" = "null" ]; then
-            echo "No runs response from GitHub API"
+          # Query recent successful runs on main (we ask per_page=50)
+          echo "Calling GH API to list successful workflow runs on main..."
+          raw=$(gh api "repos/$REPO/actions/runs" --field branch=main --field status=success --field per_page=50 2>&1) || true
+
+          echo "----- RAW API RESPONSE (first 200 lines) -----"
+          echo "$raw" | sed -n '1,200p' || true
+          echo "----- END RAW -----"
+
+          # If gh returned an error string, print and set has_baseline=false
+          if echo "$raw" | grep -q '"message"'; then
+            echo "gh api returned a message or error. Full raw output printed above."
             echo "has_baseline=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Find run id where .name equals the workflow display name
-          run_id=$(echo "$response" | jq -r --arg NAME "$WORKFLOW_DISPLAY_NAME" '.workflow_runs[] | select(.name == $NAME) | .id' | head -n1 || true)
+          # Print available workflow run names for debugging
+          echo "Available run .name values (from returned workflow_runs):"
+          echo "$raw" | jq -r '.workflow_runs[]?.name' | sed -n '1,200p' || true
+
+          # Try to find a run whose .name equals the workflow display name
+          run_id=$(echo "$raw" | jq -r --arg NAME "$WORKFLOW_DISPLAY_NAME" '.workflow_runs[] | select(.name == $NAME) | .id' | head -n1 || true)
+
+          echo "Parsed run_id: '$run_id'"
 
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "No successful workflow run named '$WORKFLOW_DISPLAY_NAME' found on main"
+            echo "No successful workflow run named '$WORKFLOW_DISPLAY_NAME' found on main (in the last 50 runs)."
             echo "has_baseline=false" >> $GITHUB_OUTPUT
           else
             echo "Found baseline run id: $run_id"
@@ -122,6 +140,7 @@ jobs:
         if: steps.get_baseline_run.outputs.has_baseline == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
