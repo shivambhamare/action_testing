@@ -1,199 +1,203 @@
-name: Nightly baselines + branch scans
+name: Build & compare with main
+
+# required so GITHUB_TOKEN can read actions & artifacts
+permissions:
+  contents: read
+  actions: read
 
 on:
-  schedule:
-    - cron: '*/3 * * * *'   # every 3 minutes (best effort)
-  workflow_dispatch:
   push:
     branches:
-      - '**'
+      - main
+      - dev
+      - '**'    # keep if you want builds on other branches
   pull_request:
     branches:
       - '**'
 
+env:
+  # Edit these two values to match your repo's nightly baseline workflow and artifact name
+  NIGHTLY_WORKFLOW_DISPLAY_NAME: "Nightly baselines + branch scans"
+  BASELINE_ARTIFACT_NAME: "main-artifact"
+
 jobs:
-  nightly_baselines:
-    # Run on schedule / manual / push but only when the ref is main
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push')
+  build-and-compare:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        scan_type: [code, container, dependency]
-
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Run ${{ matrix.scan_type }} scan on main (baseline)
-        run: |
-          set -euo pipefail
-          mkdir -p scans/${{ matrix.scan_type }}/baseline
-
-          case "${{ matrix.scan_type }}" in
-            code)
-              # TODO: replace with your real code scanner
-              echo "BASELINE: code scan for main $(date)" > scans/code/baseline/result.txt
-              ;;
-            container)
-              # TODO: replace with your real container scanner
-              echo "BASELINE: container scan for main $(date)" > scans/container/baseline/result.txt
-              ;;
-            dependency)
-              # TODO: replace with your real dependency scanner
-              echo "BASELINE: dependency scan for main $(date)" > scans/dependency/baseline/result.txt
-              ;;
-          esac
-
-          # debug listing
-          echo "Contents of scans/${{ matrix.scan_type }}/baseline:"
-          ls -la scans/${{ matrix.scan_type }}/baseline || true
-
-      - name: Upload baseline artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scan_type }}_scan_baseline
-          path: scans/${{ matrix.scan_type }}/baseline/
-
-  branch_scans:
-    # Run for non-main branch pushes/PRs only
-    if: github.event_name != 'schedule' && github.ref != 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        scan_type: [code, container, dependency]
-
-    steps:
+      # 1) Checkout the current branch (main / dev / feature / etc.)
       - name: Checkout current branch
         uses: actions/checkout@v4
 
-      - name: Run ${{ matrix.scan_type }} scan on current branch
+      # 2) Build artifact for the CURRENT branch
+      - name: Build artifact for current branch
         run: |
-          set -euo pipefail
-          mkdir -p scans/${{ matrix.scan_type }}/current
+          mkdir -p build-output
+          # 🔁 Replace this with your real build commands
+          echo "${{ github.ref_name }} build $(date)" > build-output/app.txt
 
-          case "${{ matrix.scan_type }}" in
-            code)
-              # TODO: replace with your real code scanner
-              echo "CURRENT: code scan for ${{ github.ref_name }} $(date)" > scans/code/current/result.txt
-              ;;
-            container)
-              # TODO: replace with your real container scanner
-              echo "CURRENT: container scan for ${{ github.ref_name }} $(date)" > scans/container/current/result.txt
-              ;;
-            dependency)
-              # TODO: replace with your real dependency scanner
-              echo "CURRENT: dependency scan for ${{ github.ref_name }} $(date)" > scans/dependency/current/result.txt
-              ;;
-          esac
+      # 3) If this is MAIN: just upload the artifact (no compare)
+      - name: Upload main artifact (only on main)
+        if: github.ref_name == 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-artifact
+          path: build-output/
 
-      - name: Get latest successful nightly run on main (debug)
-        id: get_baseline_run
+      # =========================================================
+      # 4) For NON-main branches: try to download baseline artifact
+      # =========================================================
+      - name: Try download baseline artifact from latest successful nightly run on main
+        if: github.ref_name != 'main'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ env.NIGHTLY_WORKFLOW_DISPLAY_NAME }}
+          BASELINE_ARTIFACT_NAME: ${{ env.BASELINE_ARTIFACT_NAME }}
         run: |
           set -euo pipefail
-          REPO="${{ github.repository }}"
-          WORKFLOW_DISPLAY_NAME="Nightly baselines + branch scans"   # must exactly match top-level 'name:'
-
           echo "Repo: $REPO"
-          echo "Workflow display name to search: '$WORKFLOW_DISPLAY_NAME'"
+          echo "Looking for latest successful run on main of workflow: '$WORKFLOW_NAME'"
 
-          # Query recent successful runs on main (we ask per_page=50)
-          echo "Calling GH API to list successful workflow runs on main..."
-          raw=$(gh api "repos/$REPO/actions/runs" --field branch=main --field status=success --field per_page=50 2>&1) || true
+          # Query recent successful runs on main (first 50)
+          API="https://api.github.com/repos/$REPO/actions/runs?branch=main&status=success&per_page=50"
+          raw=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+                         -H "Accept: application/vnd.github+json" \
+                         "$API" || true)
 
-          echo "----- RAW API RESPONSE (first 200 lines) -----"
+          echo "API call result (snippet):"
           echo "$raw" | sed -n '1,200p' || true
-          echo "----- END RAW -----"
 
-          # If gh returned an error string, print and set has_baseline=false
-          if echo "$raw" | grep -q '"message"'; then
-            echo "gh api returned a message or error. Full raw output printed above."
+          # if API returned a message field -> likely error/permission
+          if echo "$raw" | jq -e '.message? // empty' >/dev/null 2>&1; then
+            echo "API error or message returned - cannot find baseline runs. Skipping baseline download."
             echo "has_baseline=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Print available workflow run names for debugging
-          echo "Available run .name values (from returned workflow_runs):"
+          # show the names found (debug)
+          echo "Available run names (from returned workflow_runs):"
           echo "$raw" | jq -r '.workflow_runs[]?.name' | sed -n '1,200p' || true
 
-          # Try to find a run whose .name equals the workflow display name
-          run_id=$(echo "$raw" | jq -r --arg NAME "$WORKFLOW_DISPLAY_NAME" '.workflow_runs[] | select(.name == $NAME) | .id' | head -n1 || true)
-
-          echo "Parsed run_id: '$run_id'"
+          # Find the first run whose .name equals the desired workflow display name
+          run_id=$(echo "$raw" | jq -r --arg NAME "$WORKFLOW_NAME" '.workflow_runs[] | select(.name == $NAME) | .id' | head -n1 || true)
 
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "No successful workflow run named '$WORKFLOW_DISPLAY_NAME' found on main (in the last 50 runs)."
+            echo "No successful workflow run named '$WORKFLOW_NAME' found on main (in the last 50 runs)."
             echo "has_baseline=false" >> $GITHUB_OUTPUT
-          else
-            echo "Found baseline run id: $run_id"
-            echo "has_baseline=true" >> $GITHUB_OUTPUT
-            echo "run_id=$run_id" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download nightly baseline artifact (if exists)
-        if: steps.get_baseline_run.outputs.has_baseline == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          REPO="${{ github.repository }}"
-          RUN_ID="${{ steps.get_baseline_run.outputs.run_id }}"
-          ARTIFACT_NAME="${{ matrix.scan_type }}_scan_baseline"
-
-          echo "Looking for artifact named '$ARTIFACT_NAME' in run $RUN_ID"
-
-          # List artifacts and find matching id
-          artifact_id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id // empty" 2>/dev/null || true)
-
-          if [ -z "$artifact_id" ]; then
-            echo "No artifact named $ARTIFACT_NAME found in run $RUN_ID"
             exit 0
           fi
 
-          echo "Found artifact id: $artifact_id"
-          mkdir -p scans/${{ matrix.scan_type }}/baseline
-          gh api "repos/$REPO/actions/artifacts/$artifact_id/zip" -o baseline.zip
-          unzip -q baseline.zip -d scans/${{ matrix.scan_type }}/baseline
-          echo "Baseline extracted to scans/${{ matrix.scan_type }}/baseline"
+          echo "Found baseline run id: $run_id. Looking for artifact named: $BASELINE_ARTIFACT_NAME"
 
-      - name: Generate diff for ${{ matrix.scan_type }} scan (only if baseline exists)
-        if: steps.get_baseline_run.outputs.has_baseline == 'true'
+          # List artifacts for the run and find the artifact id
+          arts_raw=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+                             -H "Accept: application/vnd.github+json" \
+                             "https://api.github.com/repos/$REPO/actions/runs/$run_id/artifacts" || true)
+
+          artifact_id=$(echo "$arts_raw" | jq -r --arg A "$BASELINE_ARTIFACT_NAME" '.artifacts[] | select(.name == $A) | .id // empty' || true)
+
+          if [ -z "$artifact_id" ]; then
+            echo "No artifact named '$BASELINE_ARTIFACT_NAME' found in run $run_id."
+            echo "has_baseline=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Found artifact id: $artifact_id. Downloading..."
+          # download artifact zip
+          curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/$REPO/actions/artifacts/$artifact_id/zip" -o baseline.zip
+
+          mkdir -p baseline/build-output
+          unzip -q baseline.zip -d baseline
+          # Many uploaded zips contain a top-level folder; find build-output inside baseline
+          # If the artifact contained build-output/ directly, it will now appear under baseline/
+          echo "Contents after unzip:"
+          find baseline -maxdepth 3 -type f -print || true
+
+          # normalization: move any build-output/ subtree to baseline/build-output
+          # If unzip created baseline/build-output/ already, this will be harmless
+          if [ -d "baseline/build-output" ]; then
+            echo "baseline/build-output exists"
+          else
+            # try to locate any build-output directory in the unzipped tree
+            found=$(find baseline -type d -name 'build-output' -print -quit || true)
+            if [ -n "$found" ]; then
+              echo "Found nested build-output at: $found — moving to baseline/build-output"
+              mkdir -p baseline
+              mv "$found" baseline/build-output
+            else
+              echo "No build-output directory found inside artifact — listing baseline/*"
+              ls -la baseline || true
+            fi
+          fi
+
+          # At this point we expect baseline/build-output/ to exist
+          if [ -d "baseline/build-output" ]; then
+            echo "Baseline extracted to baseline/build-output"
+            echo "has_baseline=true" >> $GITHUB_OUTPUT
+          else
+            echo "Baseline not present after extraction"
+            echo "has_baseline=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Optional fallback: if baseline is missing, checkout main and build it locally
+      # Uncomment the following steps if you want fallback behavior
+      - name: Fallback - Checkout main and build (only if baseline missing)
+        if: github.ref_name != 'main' && steps.Try_download_baseline_artifact_from_latest_successful_nightly_run_on_main.outputs.has_baseline == 'false'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-src
+
+      - name: Fallback - Build main (only if baseline missing)
+        if: github.ref_name != 'main' && steps.Try_download_baseline_artifact_from_latest_successful_nightly_run_on_main.outputs.has_baseline == 'false'
         run: |
-          set -euo pipefail
-          mkdir -p scans/${{ matrix.scan_type }}/diff
-          DIFF_FILE="scans/${{ matrix.scan_type }}/diff/diff.txt"
+          cd main-src
+          mkdir -p build-output
+          echo "main build (fallback) $(date)" > build-output/app.txt
+          # If you used fallback, set baseline from built main
+          mkdir -p ../baseline/build-output
+          mv build-output/* ../baseline/build-output/ || true
 
-          echo "=== Diff: nightly main baseline vs ${{ github.ref_name }} for ${{ matrix.scan_type }} scan ===" > "$DIFF_FILE"
-          echo "" >> "$DIFF_FILE"
+      # =========================================================
+      # 5) For NON-main branches: compare MAIN baseline vs CURRENT branch artifact
+      # =========================================================
+      - name: Generate diff-with-main.txt
+        if: github.ref_name != 'main' && (steps.Try_download_baseline_artifact_from_latest_successful_nightly_run_on_main.outputs.has_baseline == 'true' || always() )
+        run: |
+          mkdir -p diff-output
+          echo "=== Diff: baseline/main vs ${{ github.ref_name }} ===" > diff-output/diff-with-main.txt
+          echo "" >> diff-output/diff-with-main.txt
 
-          echo ">> Baseline files:" >> "$DIFF_FILE"
-          ls -R scans/${{ matrix.scan_type }}/baseline >> "$DIFF_FILE" 2>&1 || echo "no baseline files" >> "$DIFF_FILE"
+          echo ">> listing baseline build-output"
+          ls -R baseline/build-output || echo "no baseline build-output"
+          echo "" >> diff-output/diff-with-main.txt
 
-          echo "" >> "$DIFF_FILE"
-          echo ">> Current branch files:" >> "$DIFF_FILE"
-          ls -R scans/${{ matrix.scan_type }}/current >> "$DIFF_FILE" 2>&1 || echo "no current files" >> "$DIFF_FILE"
+          echo ">> listing current branch build-output"
+          ls -R build-output || echo "no current build-output"
+          echo "" >> diff-output/diff-with-main.txt
 
-          echo "" >> "$DIFF_FILE"
-          echo ">> Unified diff:" >> "$DIFF_FILE"
+          # Only run diff if baseline exists
+          if [ -d "baseline/build-output" ]; then
+            diff -ru baseline/build-output build-output >> diff-output/diff-with-main.txt || true
+          else
+            echo "No baseline available to diff against." >> diff-output/diff-with-main.txt
+          fi
 
-          diff -ru scans/${{ matrix.scan_type }}/baseline scans/${{ matrix.scan_type }}/current >> "$DIFF_FILE" || true
-
-      - name: Upload diff artifact (only if baseline exists)
-        if: steps.get_baseline_run.outputs.has_baseline == 'true'
+      # 6) Upload diff artifact (only for non-main branches)
+      - name: Upload diff-with-main artifact
+        if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scan_type }}_scan_diff
-          path: scans/${{ matrix.scan_type }}/diff/diff.txt
+          name: diff-with-main
+          path: diff-output/diff-with-main.txt
 
-      - name: Upload current scan result
+      # 7) (Optional) upload artifact for non-main branches too
+      - name: Upload branch artifact (non-main)
+        if: github.ref_name != 'main'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scan_type }}_scan_result
-          path: scans/${{ matrix.scan_type }}/current/
+          name: ${{ github.ref_name }}-artifact
+          path: build-output/
